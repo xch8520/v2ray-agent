@@ -186,7 +186,6 @@ initVar() {
     singBoxNaivePort=
     singBoxVMessWSPort=
     singBoxVLESSWSPort=
-    singBoxVMessHTTPUpgradePort=
 
     # nginx订阅端口
     subscribePort=
@@ -356,17 +355,9 @@ readNginxSubscribe() {
     if [[ -f "${nginxConfigPath}subscribe.conf" ]]; then
         if grep -q "sing-box" "${nginxConfigPath}subscribe.conf"; then
             subscribePort=$(grep "listen" "${nginxConfigPath}subscribe.conf" | awk '{print $2}')
-            subscribeDomain=$(grep "server_name" "${nginxConfigPath}subscribe.conf" | awk '{print $2}')
-            subscribeDomain=${subscribeDomain//;/}
-            if [[ -n "${currentHost}" && "${subscribeDomain}" != "${currentHost}" ]]; then
-                subscribePort=
-                subscribeType=
-            else
-                if ! grep "listen" "${nginxConfigPath}subscribe.conf" | grep -q "ssl"; then
-                    subscribeType="http"
-                fi
+            if ! grep "listen" "${nginxConfigPath}subscribe.conf" | grep -q "ssl"; then
+                subscribeType="http"
             fi
-
         fi
     fi
 }
@@ -516,13 +507,7 @@ readInstallProtocolType() {
                 frontingType=10_naive_inbounds
                 singBoxNaivePort=$(jq .inbounds[0].listen_port "${row}.json")
             fi
-        fi
-        if echo "${row}" | grep -q VMess_HTTPUpgrade_inbounds; then
-            currentInstallProtocolType="${currentInstallProtocolType}11,"
-            if [[ "${coreInstallType}" == "2" ]]; then
-                frontingType=11_VMess_HTTPUpgrade_inbounds
-                singBoxVMessHTTPUpgradePort=$(grep 'listen' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
-            fi
+
         fi
         if echo "${row}" | grep -q socks5_inbounds; then
             currentInstallProtocolType="${currentInstallProtocolType}20,"
@@ -785,7 +770,6 @@ readConfigHostPathUUID() {
     currentCDNAddress=
     singBoxVMessWSPath=
     singBoxVLESSWSPath=
-    singBoxVMessHTTPUpgradePath=
 
     if [[ "${coreInstallType}" == "1" ]]; then
 
@@ -820,10 +804,6 @@ readConfigHostPathUUID() {
     elif [[ "${coreInstallType}" == "2" ]]; then
         if [[ -n "${frontingType}" ]]; then
             currentHost=$(jq -r .inbounds[0].tls.server_name ${configPath}${frontingType}.json)
-            if echo ${currentInstallProtocolType} | grep -q ",11," && [[ "${currentHost}" == "null" ]]; then
-                currentHost=$(grep 'server_name' <${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf | awk '{print $2}')
-                currentHost=${currentHost//;/}
-            fi
             currentUUID=$(jq -r .inbounds[0].users[0].uuid ${configPath}${frontingType}.json)
             currentClients=$(jq -r .inbounds[0].users ${configPath}${frontingType}.json)
         else
@@ -868,11 +848,6 @@ readConfigHostPathUUID() {
             singBoxVLESSWSPath=$(jq -r .inbounds[0].transport.path "${singBoxConfigPath}03_VLESS_WS_inbounds.json")
             currentPath=$(jq -r .inbounds[0].transport.path "${singBoxConfigPath}03_VLESS_WS_inbounds.json" | awk -F "[/]" '{print $2}')
             currentPath=${currentPath::-2}
-        fi
-        if [[ "${coreInstallType}" == "2" && -f "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json" ]]; then
-            singBoxVMessHTTPUpgradePath=$(jq -r .inbounds[0].transport.path "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json")
-            currentPath=$(jq -r .inbounds[0].transport.path "${singBoxConfigPath}11_VMess_HTTPUpgrade_inbounds.json" | awk -F "[/]" '{print $2}')
-            # currentPath=${currentPath::-2}
         fi
     fi
     if [[ -f "/etc/v2ray-agent/cdn" ]] && [[ -n "$(head -1 /etc/v2ray-agent/cdn)" ]]; then
@@ -1306,10 +1281,8 @@ checkPortOpen() {
     local domain=$2
     local checkPortOpenResult=
     allowPort "${port}"
-
     if [[ -z "${btDomain}" ]]; then
 
-        handleNginx stop
         # 初始化nginx配置
         touch ${nginxConfigPath}checkPortOpen.conf
         cat <<EOF >${nginxConfigPath}checkPortOpen.conf
@@ -1408,7 +1381,7 @@ updateRedirectNginxConf() {
     nginxH2Conf="listen 127.0.0.1:31302 http2 so_keepalive=on proxy_protocol;"
     nginxVersion=$(nginx -v 2>&1)
 
-    if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
+    if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]]; then
         nginxH2Conf="listen 127.0.0.1:31302 so_keepalive=on proxy_protocol;http2 on;"
     fi
 
@@ -1543,59 +1516,6 @@ server {
 }
 EOF
     handleNginx stop
-}
-# singbox Nginx config
-singBoxNginxConfig() {
-    local type=$1
-    local port=$2
-
-    local nginxH2Conf=
-    nginxH2Conf="listen ${port} http2 so_keepalive=on ssl;"
-    nginxVersion=$(nginx -v 2>&1)
-
-    local singBoxNginxSSL=
-    singBoxNginxSSL="ssl_certificate /etc/v2ray-agent/tls/${domain}.crt;ssl_certificate_key /etc/v2ray-agent/tls/${domain}.key;"
-
-    if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
-        nginxH2Conf="listen ${port} so_keepalive=on ssl;http2 on;"
-    fi
-
-    if echo "${selectCustomInstallType}" | grep -q ",11," || [[ "$1" == "all" ]]; then
-        cat <<EOF >>${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf
-server {
-	${nginxH2Conf}
-
-	server_name ${domain};
-	root ${nginxStaticPath};
-    ${singBoxNginxSSL}
-
-    ssl_protocols              TLSv1.2 TLSv1.3;
-    ssl_ciphers                TLS13_AES_128_GCM_SHA256:TLS13_AES_256_GCM_SHA384:TLS13_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305;
-    ssl_prefer_server_ciphers  on;
-
-    ssl_stapling               on;
-    ssl_stapling_verify        on;
-    resolver                   1.1.1.1 valid=60s;
-    resolver_timeout           2s;
-    client_max_body_size 100m;
-
-    location /${currentPath} {
-    	if (\$http_upgrade != "websocket") {
-            return 444;
-        }
-
-        proxy_pass                          http://127.0.0.1:31306;
-        proxy_http_version                  1.1;
-        proxy_set_header Upgrade            \$http_upgrade;
-        proxy_set_header Connection         "upgrade";
-        proxy_set_header X-Real-IP          \$remote_addr;
-        proxy_set_header X-Forwarded-For    \$proxy_add_x_forwarded_for;
-        proxy_set_header Host               \$host;
-        proxy_redirect                      off;
-	}
-}
-EOF
-    fi
 }
 
 # 检查ip
@@ -3045,11 +2965,6 @@ initSingBoxClients() {
 
             users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
         fi
-        # VMess HTTPUpgrade
-        if echo "${type}" | grep -q ",11,"; then
-            currentUser="{\"uuid\":\"${uuid}\",\"name\":\"${name}-VMess_HTTPUpgrade\",\"alterId\": 0}"
-            users=$(echo "${users}" | jq -r ". +=[${currentUser}]")
-        fi
 
         if echo "${type}" | grep -q ",20,"; then
             currentUser="{\"username\":\"${uuid}\",\"password\":\"${uuid}\"}"
@@ -3470,14 +3385,7 @@ addSingBoxRouteRule() {
     local domainList=$2
     # 路由文件名称
     local routingName=$3
-    # 读取上次安装内容
-    if [[ -f "${singBoxConfigPath}${routingName}.json" ]]; then
-        read -r -p "读取到上次的配置，是否保留 ？[y/n]:" historyRouteStatus
-        if [[ "${historyRouteStatus}" == "y" ]]; then
-            domainList="${domainList},$(jq -rc .route.rules[0].rule_set[] "${singBoxConfigPath}${routingName}.json" | awk -F "[_]" '{print $1}' | paste -sd ',')"
-            domainList="${domainList},$(jq -rc .route.rules[0].domain_regex[] "${singBoxConfigPath}${routingName}.json" | awk -F "[*]" '{print $2}' | paste -sd ',' | sed 's/\\//g')"
-        fi
-    fi
+
     local rules=
     rules=$(initSingBoxRules "${domainList}" "${routingName}")
     # domain精确匹配规则
@@ -4760,41 +4668,6 @@ EOF
     elif [[ -z "$3" ]]; then
         rm /etc/v2ray-agent/sing-box/conf/config/10_naive_inbounds.json >/dev/null 2>&1
     fi
-    if echo "${selectCustomInstallType}" | grep -q ",11," || [[ "$1" == "all" ]]; then
-        echoContent yellow "\n===================== 配置VMess+HTTPUpgrade =====================\n"
-        echoContent skyBlue "\n开始配置VMess+HTTPUpgrade协议端口"
-        echo
-        mapfile -t result < <(initSingBoxPort "${singBoxVMessHTTPUpgradePort}")
-        echoContent green "\n ---> VMess_HTTPUpgrade端口：${result[-1]}"
-
-        checkDNSIP "${domain}"
-        removeNginxDefaultConf
-        handleSingBox stop
-        randomPathFunction
-        rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
-        checkPortOpen "${result[-1]}" "${domain}"
-        singBoxNginxConfig "$1" "${result[-1]}"
-        bootStartup nginx
-        cat <<EOF >/etc/v2ray-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json
-{
-    "inbounds":[
-        {
-          "type": "vmess",
-          "listen":"127.0.0.1",
-          "listen_port":31306,
-          "tag":"VMessHTTPUpgrade",
-          "users":$(initSingBoxClients 11),
-          "transport": {
-            "type": "httpupgrade",
-            "path": "/${currentPath}"
-          }
-        }
-    ]
-}
-EOF
-    elif [[ -z "$3" ]]; then
-        rm /etc/v2ray-agent/sing-box/conf/config/11_VMess_HTTPUpgrade_inbounds.json >/dev/null 2>&1
-    fi
     removeSingBoxConfig wireguard_out_IPv4
     removeSingBoxConfig wireguard_out_IPv6
     removeSingBoxConfig IPv4_out
@@ -5172,44 +5045,6 @@ naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}
 EOF
         echoContent yellow " ---> 二维码 Naive(TLS)"
         echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=naive%2Bhttps%3A%2F%2F${email}%3A${id}%40${currentHost}%3A${port}%3Fpadding%3Dtrue%23${email}\n"
-    elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
-        qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0)
-        qrCodeBase64Default="${qrCodeBase64Default// /}"
-
-        echoContent yellow " ---> 通用json(VMess+HTTPUpgrade+TLS)"
-        echoContent green "    {\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}\n"
-        echoContent yellow " ---> 通用vmess(VMess+HTTPUpgrade+TLS)链接"
-        echoContent green "    vmess://${qrCodeBase64Default}\n"
-        echoContent yellow " ---> 二维码 vmess(VMess+HTTPUpgrade+TLS)"
-
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/default/${user}"
-   vmess://${qrCodeBase64Default}
-EOF
-        cat <<EOF >>"/etc/v2ray-agent/subscribe_local/clashMeta/${user}"
-  - name: "${email}"
-    type: vmess
-    server: ${add}
-    port: ${port}
-    uuid: ${id}
-    alterId: 0
-    cipher: auto
-    udp: true
-    tls: true
-    client-fingerprint: chrome
-    servername: ${currentHost}
-    network: ws
-    ws-opts:
-     path: ${path}
-     headers:
-       Host: ${currentHost}
-     v2ray-http-upgrade: true
-EOF
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vmess\",\"server\":\"${add}\",\"server_port\":${port},\"uuid\":\"${id}\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"${currentHost}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"packet_encoding\":\"packetaddr\",\"transport\":{\"type\":\"httpupgrade\",\"path\":\"${path}\"}}]" "/etc/v2ray-agent/subscribe_local/sing-box/${user}")
-
-        echo "${singBoxSubscribeLocalConfig}" | jq . >"/etc/v2ray-agent/subscribe_local/sing-box/${user}"
-
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
-
     fi
 
 }
@@ -5424,35 +5259,6 @@ showAccounts() {
             defaultBase64Code naive "${singBoxNaivePort}" "$(echo "${user}" | jq -r .username)" "$(echo "${user}" | jq -r .password)"
         done
 
-    fi
-    # VMess HTTPUpgrade
-    if echo ${currentInstallProtocolType} | grep -q ",11,"; then
-        echoContent skyBlue "\n================================ VMess HTTPUpgrade TLS [仅CDN推荐]  ================================\n"
-        local path="${currentPath}vws"
-        if [[ ${coreInstallType} == "1" ]]; then
-            path="/${currentPath}vws"
-        elif [[ "${coreInstallType}" == "2" ]]; then
-            path="${singBoxVMessHTTPUpgradePath}"
-        fi
-        jq .inbounds[0].settings.clients//.inbounds[0].users ${configPath}11_VMess_HTTPUpgrade_inbounds.json | jq -c '.[]' | while read -r user; do
-            local email=
-            email=$(echo "${user}" | jq -r .email//.name)
-
-            local vmessHTTPUpgradePort=${currentDefaultPort}
-            if [[ "${coreInstallType}" == "2" ]]; then
-                vmessHTTPUpgradePort="${singBoxVMessHTTPUpgradePort}"
-            fi
-
-            local count=
-            while read -r line; do
-                echoContent skyBlue "\n ---> 账号:${email}${count}"
-                echo
-                if [[ -n "${line}" ]]; then
-                    defaultBase64Code vmessHTTPUpgrade "${vmessHTTPUpgradePort}" "${email}${count}" "$(echo "${user}" | jq -r .id//.uuid)" "${line}" "${path}"
-                    count=$((count + 1))
-                fi
-            done < <(echo "${currentCDNAddress}" | tr ',' '\n')
-        done
     fi
 }
 # 移除nginx302配置
@@ -7352,7 +7158,7 @@ initSingBoxRules() {
         else
             domainRules=$(echo "${domainRules}" | jq -r ". += [\"^([a-zA-Z0-9_-]+\\\.)*${line//./\\\\.}\"]")
         fi
-    done < <(echo "$1" | tr ',' '\n' | grep -v '^$' | sort -n | uniq | paste -sd ',' | tr ',' '\n')
+    done < <(echo "$1" | tr ',' '\n')
     echo "{ \"domainRules\":${domainRules},\"ruleSet\":${ruleSet}}"
 }
 
@@ -7859,7 +7665,6 @@ customSingBoxInstall() {
     echoContent yellow "8.VLESS+Reality+gRPC"
     echoContent yellow "9.Tuic"
     echoContent yellow "10.Naive"
-    echoContent yellow "11.VMess+TLS+HTTPUpgrade"
 
     read -r -p "请选择[多选]，[例如:1,2,3]:" selectCustomInstallType
     echoContent skyBlue "--------------------------------------------------------------"
@@ -7867,7 +7672,7 @@ customSingBoxInstall() {
         echoContent red " ---> 请使用英文逗号分隔"
         exit 0
     fi
-    if [[ "${selectCustomInstallType}" != "10" ]] && [[ "${selectCustomInstallType}" != "11" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
+    if [[ "${selectCustomInstallType}" != "10" ]] && ((${#selectCustomInstallType} >= 2)) && ! echo "${selectCustomInstallType}" | grep -q ","; then
         echoContent red " ---> 多选请使用英文逗号分隔"
         exit 0
     fi
@@ -7882,7 +7687,7 @@ customSingBoxInstall() {
         totalProgress=9
         installTools 1
         # 申请tls
-        if echo "${selectCustomInstallType}" | grep -q -E ",0,|,1,|,3,|,4,|,6,|,9,|,10,|,11,"; then
+        if echo "${selectCustomInstallType}" | grep -q -E ",0,|,1,|,3,|,4,|,6,|,9,|,10,"; then
             initTLSNginxConfig 2
             installTLS 3
             handleNginx stop
@@ -7895,8 +7700,6 @@ customSingBoxInstall() {
         installCronTLS 7
         handleSingBox stop
         handleSingBox start
-        handleNginx stop
-        handleNginx start
         # 生成账号
         checkGFWStatue 8
         showAccounts 9
@@ -8272,7 +8075,7 @@ installSubscribe() {
         echo
         local httpSubscribeStatus=
 
-        if ! echo "${selectCustomInstallType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11," && ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10,|,11," && [[ -z "${domain}" ]]; then
+        if ! echo "${selectCustomInstallType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10," && ! echo "${currentInstallProtocolType}" | grep -qE ",0,|,1,|,2,|,3,|,4,|,5,|,6,|,9,|,10," && [[ -z "${domain}" ]]; then
             httpSubscribeStatus=true
         fi
 
@@ -8301,7 +8104,7 @@ installSubscribe() {
         if [[ -n "$(curl --connect-timeout 2 -s -6 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
             listenIPv6="listen [::]:${result[-1]} ${SSLType};"
         fi
-        if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
+        if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]]; then
             nginxSubscribeListen="listen ${result[-1]} ${SSLType} so_keepalive=on;http2 on;${listenIPv6}"
         else
             nginxSubscribeListen="listen ${result[-1]} ${SSLType} so_keepalive=on;${listenIPv6}"
@@ -9402,7 +9205,7 @@ menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
     echoContent green "作者：mack-a"
-    echoContent green "当前版本：v3.3.7"
+    echoContent green "当前版本：v3.3.3"
     echoContent green "Github：https://github.com/mack-a/v2ray-agent"
     echoContent green "描述：八合一共存脚本\c"
     showInstallStatus
